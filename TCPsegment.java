@@ -43,4 +43,16 @@ protected short computeChecksum(byte[] bytes) {
     return (short) ~sum; // one's complement
 }
 
+protected byte[] serialize() {
+    return new byte[0]; // Placeholder implementation
+}
 
+protected static TCPSegment deserialize(byte[] bytes) {
+    return new TCPSegment(0, 0, 0, new byte[0], false, false, false); // Placeholder implementation
+}
+
+protected boolean isValidChecksum() {
+    byte[] segmentBytes = serialize();
+    short computedChecksum = computeChecksum(segmentBytes);
+    return computedChecksum == 0; // valid if checksum is 0 after including the checksum field
+}
