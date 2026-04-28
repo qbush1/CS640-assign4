@@ -62,12 +62,26 @@ public class TCPsender {
         // Implementation for sending data segments, handling acknowledgments, retransmissions, etc.
         int bytesSent = 0;
         while (bytesSent < fileSize) {
-            int chunkSize = Math.min(mtu - 24, fileSize - bytesSent);
-            byte[] chunk = Arrays.copyOfRange(fileData, bytesSent, bytesSent + chunkSize);
+            // fill window
+            while (window.canSend() && bytesSent < fileSize) {
+                int chunkSize = Math.min(mtu - 24, fileSize - bytesSent);
+                byte[] chunk = Arrays.copyOfRange(fileData, bytesSent, bytesSent + chunkSize);
+                TCPsegment segment = new TCPsegment(bytesSent + 1, 0, System.currentTimeMillis(), chunk, false, true, false);
+                sendSegment(segment);
+                window.markSent(segment.getSeqNum, segment);
+                bytesSent += chunkSize;
+            }  
 
-            TCPsegment segment = new TCPsegment(bytesSent + 1, 0, System.currentTimeMillis(), chunk, false, true, false);
-            sendSegment(segment);
-            bytesSent += chunkSize;
+            // try to receive ACK
+            TCPsegment ack = receiveSegment();
+            if(ack != null || !ack.isValidChecksum()) {
+                processAck(ack);
+            }
+
+            // check timeout
+            if(window.isExpired(currentTimeout)) {
+                retransmitWindow();
+            }
     }
 
     private void sendSegment(TCPsegment segment) {
@@ -79,15 +93,33 @@ public class TCPsender {
 
     private TCPsegment receiveSegment() {
         // Implementation for receiving a TCP segment from the network
-        byte[] buffer = new byte[mtu + 24];
-        DatagramPacket packet = new DatagramPacket(buffer, buffer.length);
-        socket.receive(packet);
-        return TCPsegment.deserialize(packet.getData());
+        try {
+            byte[] buffer = new byte[mtu + 24];
+            DatagramPacket packet = new DatagramPacket(buffer, buffer.length);
+            socket.receive(packet);
+            return TCPsegment.deserialize(packet.getData());
+        } catch (SocketTimeoutException e) {
+            return null;
+        } catch (IOException e) {
+            return null;
+        }
     }
 
-    public void processAck(int ackNum) {
+    public void processAck(TCPsegment ack) {
         // Implementation for processing received ACKs, updating the sender's state, etc.
         int ackNum = ack.getAckNum();
+
+        if(ackNum == lastAckNum) {
+            dupAckCount++;
+            if(dupAckCount >= 3) {
+                retransmitWindow(ack.getSeqNum());
+                dupAckCount = 0;
+            }
+        } else {
+            lastAckNum = ackNum;
+            dupAckCount = 0;
+            window.advance(ackNum);
+        }
 
     }
 
@@ -108,4 +140,57 @@ public class TCPsender {
     protected void printStatistics() {
         // Implementation for printing final statistics (e.g., total segments sent, retransmissions, etc.)
     }
+
+    private class SlidingWindow {
+        private class WindowSlot {
+            TCPSegment segment;
+        }
+        private WindowSlot[] slots;
+        private int windowSize;
+        private long windowSendTime;
+        private int base;
+        private int nextSlot;
+        private int inFlight;
+
+        SlidingWindow(int windowSize) {
+            this.windowSize = windowSize;
+            this.slots = new WindowSlot[windowSize];
+            this.base = 0;
+            this.nextSlot = 0;
+            this.inFlight = 0;
+            this.windowSendTime = System.currentTimeMillis();
+        }
+
+        void markSent(int seqNum, TCPsegment segment) {
+            WindowSlot = new WindowSlot();
+            slot.segment = segment;
+            slot.retransmitCount = 0;
+            slot.wasRetransmitted = false;
+            slots[nextSlot % windowSize] = slot;
+            nextSlot++;
+            inFlight++;
+            windowSendTime = System.currentTimeMillis();
+        }
+
+        boolean canSend() {
+            return inFlight < windowSize;
+        }
+
+        void advance(int ackNum) {
+            while(base < nextSlot && 
+                slots[base % windowSize] != null && 
+                slots[base % windowSize].segment.getSeqNum() < ackNum) {
+
+                slots[base % windowSize] == null;
+                base++;
+                inFlight--;
+            }
+        }
+
+        boolean isExpired() {
+            if(inFlight == 0) return false;
+            return System.currentTimeMillis() - windowSendTime > timeout;
+        }
+    }
+
 }
