@@ -38,7 +38,7 @@ public class TCPsender {
     private long startTime;
 
     // constructor for TCPsender
-    public TCPsender(int port, InetAddress remoteIP, int remotePort, String filename, int mtu, int sws) {
+    public TCPsender(int port, InetAddress remoteIP, int remotePort, String filename, int mtu, int sws) throws IOException {
         this.port = port;
         this.mtu = mtu;
         this.sws = sws;
@@ -60,10 +60,11 @@ public class TCPsender {
         printStats();
     }
 
-    public void establishConnection() {
+    public void establishConnection() throws IOException {
         // send SYN
         TCPsegment syn = new TCPsegment(0, 0, System.nanoTime(), null, true, false, false);
         sendSegment(syn);
+        window.markSent(syn);
 
         // wait for SYN+ACK
         TCPsegment synAck = receiveSegment();
@@ -82,13 +83,13 @@ public class TCPsender {
         sendSegment(ack);
     }
 
-    public void sendData() {
+    public void sendData() throws IOException {
         // Implementation for sending data segments, handling acknowledgments, retransmissions, etc.
         int bytesSent = 0;
         while (bytesSent < fileSize || window.inFlightCount() > 0) {
             // fill window
             while (window.canSend() && bytesSent < fileSize) {
-                int chunkSize = Math.min(mtu, fileSize - bytesSent);
+                int chunkSize = Math.min(mtu - 24, fileSize - bytesSent);
                 byte[] chunk = Arrays.copyOfRange(fileData, bytesSent, bytesSent + chunkSize);
                 TCPsegment segment = new TCPsegment(bytesSent + 1, 0, System.nanoTime(), chunk, false, false, false);
                 sendSegment(segment);
@@ -116,7 +117,7 @@ public class TCPsender {
         }
     }
 
-    private void sendSegment(TCPsegment segment) {
+    private void sendSegment(TCPsegment segment) throws IOException {
         // Implementation for sending a TCP segment over the network
         byte[] bytes = segment.serialize();
         DatagramPacket packet = new DatagramPacket(bytes, bytes.length, remoteIP, remotePort);
@@ -187,7 +188,7 @@ public class TCPsender {
         }
     }
 
-    public void terminateConnection() {
+    public void terminateConnection() throws IOException{
         // Implementation for terminating a TCP connection (e.g., sending FIN, waiting for ACK, etc.)
         TCPsegment fin = new TCPsegment(fileSize + 1, 0, System.nanoTime(), null, false, false, true);
         sendSegment(fin);
@@ -287,9 +288,13 @@ public class TCPsender {
             slot.retransmitCount = 0;
             slot.wasRetransmitted = false;
             slots[nextSlot % windowSize] = slot;
+
+            if (inFlight == 0) {
+                windowSendTime = System.nanoTime();
+            }
+
             nextSlot++;
             inFlight++;
-            windowSendTime = System.nanoTime();
         }
 
         boolean canSend() {
@@ -299,7 +304,7 @@ public class TCPsender {
         void advance(int ackNum) {
             while(base < nextSlot && 
                 slots[base % windowSize] != null && 
-                slots[base % windowSize].segment.getSeqNum() < ackNum) {
+                slots[base % windowSize].segment.getSeqNum() + slots[base % windowSize].segment.getDataLength() <= ackNum) {
 
                 slots[base % windowSize] = null;
                 base++;
