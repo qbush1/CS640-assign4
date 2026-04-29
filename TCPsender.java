@@ -1,17 +1,17 @@
 import java.net.DatagramSocket;
 import java.net.InetAddress;
 import java.net.DatagramPacket;
-import java.utils.Arrays;
-import java.utils.List;
+import java.util.Arrays;
+import java.util.List;
 
 public class TCPsender {
 
     private DatagramSocket socket;
     private InetAddress remoteIP;
+    private int port;
     private int mtu;
     private int sws;
     private int remotePort;
-    private Socket socket;
     private byte[] fileData;
     private int fileSize;
 
@@ -23,13 +23,24 @@ public class TCPsender {
 
     private SlidingWindow window;
     private boolean firstAck = true;
+    private int incorrectChecksum;
+    private int outOfSeqPackets;
+    private int dataSent;
+    private int packetsSent;
+    private int numRetransmissions;
+    private int packetsDiscarded;
+    private int packetsReceived;
+    private long currentTimeout = 5_000_000_000L;
+    private long startTime;
 
     // constructor for TCPsender
     public TCPsender(int port, InetAddress remoteIP, int remotePort, String filename, int mtu, int sws) {
+        this.port = port;
         this.mtu = mtu;
         this.sws = sws;
         this.remoteIP = remoteIP;
         this.remotePort = remotePort;
+        this.startTime = System.nanoTime();
 
         this.socket = new DatagramSocket(port);
         socket.setSoTimer(10);
@@ -42,7 +53,7 @@ public class TCPsender {
         establishConnection();
         sendData();
         terminateConnection();
-        printStatistics();
+        printStats();
     }
 
     public void establishConnection() {
@@ -52,9 +63,15 @@ public class TCPsender {
 
         // wait for SYN+ACK
         TCPsegment synAck = receiveSegment();
-        while(synAck == null || !synAck.isSYN() || !synAck.isACK()) {
+        while(synAck == null || !(synAck.isSYN() && synAck.isACK())) {
             synAck = receiveSegment();
+
+            if(window.isExpired(currentTimeout)) {
+                sendSegment(syn);
+                window.resetWindowTimer();
+            }
         }
+        log("rcv", synAck);
 
         // send ACK
         TCPsegment ack = new TCPsegment(1, synAck.getSeqNum() + 1, System.nanoTime(), null, false, true, false);
@@ -64,21 +81,27 @@ public class TCPsender {
     public void sendData() {
         // Implementation for sending data segments, handling acknowledgments, retransmissions, etc.
         int bytesSent = 0;
-        while (bytesSent < fileSize) {
+        while (bytesSent < fileSize || window.inFlightCount() > 0) {
             // fill window
             while (window.canSend() && bytesSent < fileSize) {
-                int chunkSize = Math.min(mtu - 24, fileSize - bytesSent);
+                int chunkSize = Math.min(mtu, fileSize - bytesSent);
                 byte[] chunk = Arrays.copyOfRange(fileData, bytesSent, bytesSent + chunkSize);
                 TCPsegment segment = new TCPsegment(bytesSent + 1, 0, System.nanoTime(), chunk, false, false, false);
                 sendSegment(segment);
-                window.markSent(segment.getSeqNum, segment);
+                window.markSent(segment.getSeqNum(), segment);
                 bytesSent += chunkSize;
             }  
 
             // try to receive ACK
             TCPsegment ack = receiveSegment();
-            if(ack != null && ack.isValidChecksum()) {
-                processAck(ack);
+            if(ack != null) {
+                if(ack.isValidChecksum()) {
+                    log("rcv", ack);
+                    packetsReceived++;
+                    processAck(ack);
+                } else {
+                    packetsDiscarded++;
+                }
             }
 
             // check timeout
@@ -86,6 +109,7 @@ public class TCPsender {
                 retransmitWindow();
                 window.resetWindowTimer();
             }
+        }
     }
 
     private void sendSegment(TCPsegment segment) {
@@ -93,6 +117,11 @@ public class TCPsender {
         byte[] bytes = segment.serialize();
         DatagramPacket packet = new DatagramPacket(bytes, bytes.length, remoteIP, remotePort);
         socket.send(packet);
+        log("snd", segment);
+        packetsSent++;
+        if (segment.getData() != null && segment.getDataLength() > 0) {
+            dataSent += segment.getDataLength();
+        } 
     }
 
     private TCPsegment receiveSegment() {
@@ -150,26 +179,32 @@ public class TCPsender {
             sendSegment(resend);
             window.markRetransmitted(seg.getSeqNum());
             window.incrementRetransmitCount(seg.getSeqNum());
-            retransmissions++;
+            numRetransmissions++;
         }
     }
 
     public void terminateConnection() {
         // Implementation for terminating a TCP connection (e.g., sending FIN, waiting for ACK, etc.)
-        TCPsegment fin = new TCPsegment(filesize + 1, 0, System.nanoTime(), null, false, false, true);
+        TCPsegment fin = new TCPsegment(fileSize + 1, 0, System.nanoTime(), null, false, false, true);
         sendSegment(fin);
         window.markSent(fin.getSeqNum(), fin);
 
         TCPsegment ack = receiveSegment();
-        while(ack == null || !ack.isAck()) {
+        while(ack == null || !ack.isACK()) {
             ack = receiveSegment();
+            if(window.isExpired(currentTimeout)) {
+                sendSegment(fin);
+                window.resetWindowTimer();
+                numRetransmissions++;            }
         }
+        log("rcv", ack);
         window.advance(ack.getAckNum());
 
         TCPsegment rcvFin = receiveSegment();
-        while(rcvFin == null || !rcvFin.isFin()) {
+        while(rcvFin == null || !rcvFin.isFIN()) {
             rcvFin = receiveSegment();
         }
+        log("rcv", rcvFin);
 
         TCPsegment finalAck = new TCPsegment(fileSize + 2, rcvFin.getSeqNum() + 1, System.nanoTime(), null, false, true, false);
         sendSegment(finalAck);
@@ -179,7 +214,7 @@ public class TCPsender {
     private void updateTimeout(long rtt) {
         // Implementation for updating the timeout value based on RTT measurements
 
-        double SRTT = System.nanoTime() - timestamp;
+        double SRTT = System.nanoTime() - rtt;
         if(firstAck) {
             ERTT = SRTT;
             EDEV = 0;
@@ -194,8 +229,30 @@ public class TCPsender {
 
     }
 
-    private void printStatistics() {
-        // Implementation for printing final statistics (e.g., total segments sent, retransmissions, etc.)
+    private byte[] loadFile(String fileName) throws IOException {
+        File file = new File(fileName);
+        byte[] data = new byte[(int) file.length()];
+        try (FileInputStream inputStream = new FileInputStream(file)) {
+            inputStream.read(data);
+        }
+        return data;
+    }
+
+    private void log(String direction, TCPsegment seg) {
+        double time = (System.nanoTime() - startTime) / 1e9;
+        String s = seg.isSYN() ? "S" : "-";
+        String a = seg.isACK() ? "A" : "-";
+        String f = seg.isFIN() ? "F" : "-";
+        String d = seg.getDataLength() > 0 ? "D" : "-";
+        System.out.printf("%s %.3f %s %s %s %s %d %d %d%n",
+            direction, time, s, a, f, d,
+            seg.getSeqNum(), seg.getDataLength(), seg.getAckNum());
+    }
+
+    private void printStats() {
+        System.out.printf("%db %d %d %d %d %d%n",
+            dataSent, packetsSent, 0,
+            packetsDiscarded, numRetransmissions, 0);
     }
 
     private class SlidingWindow {
@@ -221,7 +278,7 @@ public class TCPsender {
         }
 
         void markSent(int seqNum, TCPsegment segment) {
-            WindowSlot = new WindowSlot();
+            WindowSlot slot = new WindowSlot();
             slot.segment = segment;
             slot.retransmitCount = 0;
             slot.wasRetransmitted = false;
@@ -240,13 +297,13 @@ public class TCPsender {
                 slots[base % windowSize] != null && 
                 slots[base % windowSize].segment.getSeqNum() < ackNum) {
 
-                slots[base % windowSize] == null;
+                slots[base % windowSize] = null;
                 base++;
                 inFlight--;
             }
         }
 
-        boolean isExpired() {
+        boolean isExpired(long timeout) {
             if(inFlight == 0) return false;
             return System.nanoTime() - windowSendTime > timeout;
         }
@@ -302,6 +359,10 @@ public class TCPsender {
                 }
             }
             return false;
+        }
+
+        int inFlightCount() {
+            return inFlight;
         }
 
     }
