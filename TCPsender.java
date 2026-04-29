@@ -99,14 +99,10 @@ public class TCPsender {
 
             // try to receive ACK
             TCPsegment ack = receiveSegment();
-            if(ack != null) {
-                if(ack.isValidChecksum()) {
-                    log("rcv", ack);
-                    packetsReceived++;
+            if(ack != null && ack.isValidChecksum()) {
+                log("rcv", ack);
+                packetsReceived++;
                     processAck(ack);
-                } else {
-                    packetsDiscarded++;
-                }
             }
 
             // check timeout
@@ -200,7 +196,8 @@ public class TCPsender {
             if(window.isExpired(currentTimeout)) {
                 sendSegment(fin);
                 window.resetWindowTimer();
-                numRetransmissions++;            }
+                numRetransmissions++;            
+            }
         }
         log("rcv", ack);
         window.advance(ack.getAckNum());
