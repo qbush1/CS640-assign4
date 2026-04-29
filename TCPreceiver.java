@@ -178,6 +178,8 @@ public class TCPreceiver {
             int retries = 0;
             socket.setSoTimeout(5000);
             while (retries < 16) {
+                
+                // If duplicate FINs are sent because of no ACK we currently will print out multiple lines
                 socket.send(new DatagramPacket(finBytes, finBytes.length, senderAddress, senderPort));
                 log("snd", fin);
                 
