@@ -25,6 +25,7 @@ public class TCPsender {
 
     private int lastAckNum = 0;
     private int dupAckCount = 0;
+    private int receiverNextSeq = 0; // receiver's next expected seq, used as ackNum in data packets
 
     private SlidingWindow window;
     private boolean firstAck = true;
@@ -78,9 +79,15 @@ public class TCPsender {
         }
         log("rcv", synAck);
 
+        // track receiver's seqNum so data packets can ACK it correctly
+        receiverNextSeq = synAck.getSeqNum() + 1;
+
         // send ACK
-        TCPsegment ack = new TCPsegment(1, synAck.getSeqNum() + 1, System.nanoTime(), null, false, true, false);
+        TCPsegment ack = new TCPsegment(1, receiverNextSeq, System.nanoTime(), null, false, true, false);
         sendSegment(ack);
+
+        // clear SYN from window so it isn't retransmitted during data phase
+        window.advance(1);
     }
 
     public void sendData() throws IOException {
@@ -91,7 +98,7 @@ public class TCPsender {
             while (window.canSend() && bytesSent < fileSize) {
                 int chunkSize = Math.min(mtu - 24, fileSize - bytesSent);
                 byte[] chunk = Arrays.copyOfRange(fileData, bytesSent, bytesSent + chunkSize);
-                TCPsegment segment = new TCPsegment(bytesSent + 1, 0, System.nanoTime(), chunk, false, false, false);
+                TCPsegment segment = new TCPsegment(bytesSent + 1, receiverNextSeq, System.nanoTime(), chunk, false, true, false);
                 sendSegment(segment);
                 window.markSent(segment);
                 bytesSent += chunkSize;
@@ -143,7 +150,7 @@ public class TCPsender {
         }
     }
 
-    public void processAck(TCPsegment ack) {
+    public void processAck(TCPsegment ack) throws IOException {
         // Implementation for processing received ACKs, updating the sender's state, etc.
         int ackNum = ack.getAckNum();
 
@@ -168,7 +175,7 @@ public class TCPsender {
     }
 
     
-    public void retransmitWindow() {
+    public void retransmitWindow() throws IOException {
         // Implementation for retransmitting a segment with the given sequence number
         List<TCPsegment> segs = window.getSegments();
 

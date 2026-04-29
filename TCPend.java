@@ -1,3 +1,7 @@
+import java.io.IOException;
+import java.net.InetAddress;
+import java.net.UnknownHostException;
+
 public class TCPend {
 
     static int port = 0;
@@ -12,8 +16,17 @@ public class TCPend {
 
         if (remoteIP != null) {
             // Sender mode: java TCPend -p <port> -s <remote IP> -a <remote port> -f <file name> -m <mtu> -c <sws>
-            TCPsender sender = new TCPsender(port, remoteIP, remotePort, fileName, mtu, sws);
-            sender.run();
+            try {
+                InetAddress addr = InetAddress.getByName(remoteIP);
+                TCPsender sender = new TCPsender(port, addr, remotePort, fileName, mtu, sws);
+                sender.run();
+            } catch (UnknownHostException e) {
+                System.err.println("Unknown host: " + remoteIP);
+                System.exit(1);
+            } catch (IOException e) {
+                e.printStackTrace();
+                System.exit(1);
+            }
         } else {
             // Receiver mode: java TCPend -p <port> -m <mtu> -c <sws> -f <file name>
             TCPreceiver receiver = new TCPreceiver(port, fileName, mtu, sws);
