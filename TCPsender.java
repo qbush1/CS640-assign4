@@ -3,6 +3,11 @@ import java.net.InetAddress;
 import java.net.DatagramPacket;
 import java.util.Arrays;
 import java.util.List;
+import java.util.ArrayList;
+import java.net.SocketTimeoutException;
+import java.io.IOException;
+import java.io.File;
+import java.io.FileInputStream;
 
 public class TCPsender {
 
@@ -23,7 +28,6 @@ public class TCPsender {
 
     private SlidingWindow window;
     private boolean firstAck = true;
-    private int incorrectChecksum;
     private int outOfSeqPackets;
     private int dataSent;
     private int packetsSent;
@@ -43,7 +47,7 @@ public class TCPsender {
         this.startTime = System.nanoTime();
 
         this.socket = new DatagramSocket(port);
-        socket.setSoTimer(10);
+        socket.setSoTimeout(10);
         fileData = loadFile(filename);
         fileSize = fileData.length;
         window = new SlidingWindow(sws);
@@ -88,7 +92,7 @@ public class TCPsender {
                 byte[] chunk = Arrays.copyOfRange(fileData, bytesSent, bytesSent + chunkSize);
                 TCPsegment segment = new TCPsegment(bytesSent + 1, 0, System.nanoTime(), chunk, false, false, false);
                 sendSegment(segment);
-                window.markSent(segment.getSeqNum(), segment);
+                window.markSent(segment);
                 bytesSent += chunkSize;
             }  
 
@@ -187,7 +191,7 @@ public class TCPsender {
         // Implementation for terminating a TCP connection (e.g., sending FIN, waiting for ACK, etc.)
         TCPsegment fin = new TCPsegment(fileSize + 1, 0, System.nanoTime(), null, false, false, true);
         sendSegment(fin);
-        window.markSent(fin.getSeqNum(), fin);
+        window.markSent(fin);
 
         TCPsegment ack = receiveSegment();
         while(ack == null || !ack.isACK()) {
@@ -259,7 +263,7 @@ public class TCPsender {
         private class WindowSlot {
             TCPsegment segment;
             int retransmitCount;
-            int wasRetransmitted;
+            boolean wasRetransmitted;
         }
         private WindowSlot[] slots;
         private int windowSize;
@@ -277,7 +281,7 @@ public class TCPsender {
             this.windowSendTime = System.nanoTime();
         }
 
-        void markSent(int seqNum, TCPsegment segment) {
+        void markSent(TCPsegment segment) {
             WindowSlot slot = new WindowSlot();
             slot.segment = segment;
             slot.retransmitCount = 0;
