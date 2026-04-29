@@ -2,6 +2,7 @@ import java.net.DatagramSocket;
 import java.net.InetAddress;
 import java.net.DatagramPacket;
 import java.utils.Arrays;
+import java.utils.List;
 
 public class TCPsender {
 
@@ -21,7 +22,9 @@ public class TCPsender {
     private int dupAckCount = 0;
 
     private SlidingWindow window;
+    private boolean firstAck = true;
 
+    // constructor for TCPsender
     public TCPsender(int port, InetAddress remoteIP, int remotePort, String filename, int mtu, int sws) {
         this.mtu = mtu;
         this.sws = sws;
@@ -44,7 +47,7 @@ public class TCPsender {
 
     public void establishConnection() {
         // send SYN
-        TCPsegment syn = new TCPsegment(0, 0, System.currentTimeMillis(), null, true, false, false);
+        TCPsegment syn = new TCPsegment(0, 0, System.nanoTime(), null, true, false, false);
         sendSegment(syn);
 
         // wait for SYN+ACK
@@ -54,7 +57,7 @@ public class TCPsender {
         }
 
         // send ACK
-        TCPsegment ack = new TCPsegment(1, synAck.getSeqNum() + 1, System.currentTimeMillis(), null, false, true, false);
+        TCPsegment ack = new TCPsegment(1, synAck.getSeqNum() + 1, System.nanoTime(), null, false, true, false);
         sendSegment(ack);
     }
 
@@ -66,7 +69,7 @@ public class TCPsender {
             while (window.canSend() && bytesSent < fileSize) {
                 int chunkSize = Math.min(mtu - 24, fileSize - bytesSent);
                 byte[] chunk = Arrays.copyOfRange(fileData, bytesSent, bytesSent + chunkSize);
-                TCPsegment segment = new TCPsegment(bytesSent + 1, 0, System.currentTimeMillis(), chunk, false, true, false);
+                TCPsegment segment = new TCPsegment(bytesSent + 1, 0, System.nanoTime(), chunk, false, false, false);
                 sendSegment(segment);
                 window.markSent(segment.getSeqNum, segment);
                 bytesSent += chunkSize;
@@ -74,13 +77,14 @@ public class TCPsender {
 
             // try to receive ACK
             TCPsegment ack = receiveSegment();
-            if(ack != null || !ack.isValidChecksum()) {
+            if(ack != null && ack.isValidChecksum()) {
                 processAck(ack);
             }
 
             // check timeout
             if(window.isExpired(currentTimeout)) {
                 retransmitWindow();
+                window.resetWindowTimer();
             }
     }
 
@@ -109,10 +113,16 @@ public class TCPsender {
         // Implementation for processing received ACKs, updating the sender's state, etc.
         int ackNum = ack.getAckNum();
 
+        if(!window.wasRetransmitted(ackNum)) {
+            updateTimeout(ack.getTimestamp());
+        }
+
         if(ackNum == lastAckNum) {
             dupAckCount++;
             if(dupAckCount >= 3) {
-                retransmitWindow(ack.getSeqNum());
+                // fast retransmit
+                retransmitWindow();
+                window.resetWindowTimer();
                 dupAckCount = 0;
             }
         } else {
@@ -124,26 +134,75 @@ public class TCPsender {
     }
 
     
-    public void retransmitWindow(int seqNum) {
+    public void retransmitWindow() {
         // Implementation for retransmitting a segment with the given sequence number
+        List<TCPsegment> segs = window.getSegments();
+
+        for (TCPsegment seg : segs) {
+            if (window.maxRetransmitsReached(seg.getSeqNum())) {
+                System.err.println("Max retransmissions reached, giving up");
+                System.exit(1);
+            }
+            // rebuild segment with fresh timestamp for RTT measurement
+            TCPsegment resend = new TCPsegment(seg.getSeqNum(), seg.getAckNum(),
+                                               System.nanoTime(), seg.getData(),
+                                               seg.isSYN(), seg.isACK(), seg.isFIN());
+            sendSegment(resend);
+            window.markRetransmitted(seg.getSeqNum());
+            window.incrementRetransmitCount(seg.getSeqNum());
+            retransmissions++;
+        }
     }
 
     public void terminateConnection() {
         // Implementation for terminating a TCP connection (e.g., sending FIN, waiting for ACK, etc.)
+        TCPsegment fin = new TCPsegment(filesize + 1, 0, System.nanoTime(), null, false, false, true);
+        sendSegment(fin);
+        window.markSent(fin.getSeqNum(), fin);
+
+        TCPsegment ack = receiveSegment();
+        while(ack == null || !ack.isAck()) {
+            ack = receiveSegment();
+        }
+        window.advance(ack.getAckNum());
+
+        TCPsegment rcvFin = receiveSegment();
+        while(rcvFin == null || !rcvFin.isFin()) {
+            rcvFin = receiveSegment();
+        }
+
+        TCPsegment finalAck = new TCPsegment(fileSize + 2, rcvFin.getSeqNum() + 1, System.nanoTime(), null, false, true, false);
+        sendSegment(finalAck);
+
     }
     
-    protected void updateTimeout(long rtt) {
+    private void updateTimeout(long rtt) {
         // Implementation for updating the timeout value based on RTT measurements
+
+        double SRTT = System.nanoTime() - timestamp;
+        if(firstAck) {
+            ERTT = SRTT;
+            EDEV = 0;
+            currentTimeout = (long)(2 * ERTT);
+            firstAck = false;
+        } else {
+            double SDEV = Math.abs(SRTT - ERTT);
+            ERTT = 0.875 * ERTT + 0.125 * SRTT;
+            EDEV = 0.75 * EDEV + 0.25 * SDEV;
+            currentTimeout = (long)(ERTT + 4 * EDEV);
+        }
 
     }
 
-    protected void printStatistics() {
+    private void printStatistics() {
         // Implementation for printing final statistics (e.g., total segments sent, retransmissions, etc.)
     }
 
     private class SlidingWindow {
         private class WindowSlot {
-            TCPSegment segment;
+            TCPsegment segment;
+            int retransmitCount;
+            int wasRetransmitted;
         }
         private WindowSlot[] slots;
         private int windowSize;
@@ -158,7 +217,7 @@ public class TCPsender {
             this.base = 0;
             this.nextSlot = 0;
             this.inFlight = 0;
-            this.windowSendTime = System.currentTimeMillis();
+            this.windowSendTime = System.nanoTime();
         }
 
         void markSent(int seqNum, TCPsegment segment) {
@@ -169,7 +228,7 @@ public class TCPsender {
             slots[nextSlot % windowSize] = slot;
             nextSlot++;
             inFlight++;
-            windowSendTime = System.currentTimeMillis();
+            windowSendTime = System.nanoTime();
         }
 
         boolean canSend() {
@@ -189,8 +248,62 @@ public class TCPsender {
 
         boolean isExpired() {
             if(inFlight == 0) return false;
-            return System.currentTimeMillis() - windowSendTime > timeout;
+            return System.nanoTime() - windowSendTime > timeout;
         }
+
+        List<TCPsegment> getSegments() {
+            List<TCPsegment> segs = new ArrayList<>();
+            for (int i = base; i < nextSlot; i++) {
+                WindowSlot slot = slots[i % windowSize];
+                if (slot != null) segs.add(slot.segment);
+            }
+            return segs;
+        }
+
+        void resetWindowTimer() {
+            windowSendTime = System.nanoTime();
+        }
+
+        void markRetransmitted(int seqNum) {
+            for (int i = base; i < nextSlot; i++) {
+                WindowSlot slot = slots[i % windowSize];
+                if (slot != null && slot.segment.getSeqNum() == seqNum) {
+                    slot.wasRetransmitted = true;
+                    return;
+                }
+            }
+        }
+
+        void incrementRetransmitCount(int seqNum) {
+            for (int i = base; i < nextSlot; i++) {
+                WindowSlot slot = slots[i % windowSize];
+                if (slot != null && slot.segment.getSeqNum() == seqNum) {
+                    slot.retransmitCount++;
+                    return;
+                }
+            }
+        }
+
+        boolean maxRetransmitsReached(int seqNum) {
+            for (int i = base; i < nextSlot; i++) {
+                WindowSlot slot = slots[i % windowSize];
+                if (slot != null && slot.segment.getSeqNum() == seqNum) {
+                    return slot.retransmitCount >= 16;
+                }
+            }
+            return false;
+        }
+
+        boolean wasRetransmitted(int ackNum) {
+            for (int i = base; i < nextSlot; i++) {
+                WindowSlot slot = slots[i % windowSize];
+                if (slot != null && slot.segment.getSeqNum() < ackNum) {
+                    return slot.wasRetransmitted;
+                }
+            }
+            return false;
+        }
+
     }
 
 }
