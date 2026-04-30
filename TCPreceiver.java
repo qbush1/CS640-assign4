@@ -69,7 +69,7 @@ public class TCPreceiver {
             while (true) {
                 socket.receive(packet);
                 TCPsegment segment = TCPsegment.deserialize(packet.getData());
-                if (!segment.isValidChecksum()) { incorrectChecksum++; continue; }
+                if (!segment.isValidChecksum()) { continue; }
                 if (segment.isSYN()) {
                     log("rcv", segment);
                     break;
@@ -91,12 +91,11 @@ public class TCPreceiver {
             while (retries < 16) {
                 socket.send(new DatagramPacket(synAckBytes, synAckBytes.length, senderAddress, senderPort));
                 log("snd", synAck);
-                if (retries > 0) retransmissions++;
                 try {
                     socket.receive(packet);
                     TCPsegment response = TCPsegment.deserialize(packet.getData());
-                    if (!response.isValidChecksum()) { incorrectChecksum++; continue; }
-                    if (response.isACK()) {
+                    if (!response.isValidChecksum()) { continue; }
+                    if (response.isACK() && response.getDataLength() == 0 && !response.isFIN()) {
                         log("rcv", response);
                         break;
                     }
@@ -189,11 +188,10 @@ public class TCPreceiver {
                 socket.send(new DatagramPacket(finBytes, finBytes.length, senderAddress, senderPort));
                 log("snd", fin);
                 
-                if (retries > 0) retransmissions++;
                 try {
                     socket.receive(packet);
                     TCPsegment response = TCPsegment.deserialize(packet.getData());
-                    if (!response.isValidChecksum()) { incorrectChecksum++; continue; }
+                    if (!response.isValidChecksum()) { continue; }
                     if (response.isACK()) {
                         log("rcv", response);
                         break;

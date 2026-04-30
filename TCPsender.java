@@ -109,8 +109,7 @@ public class TCPsender {
             TCPsegment ack = receiveSegment();
             if(ack != null && ack.isValidChecksum()) {
                 log("rcv", ack);
-                packetsReceived++;
-                    processAck(ack);
+                processAck(ack);
             }
 
             // check timeout
@@ -201,7 +200,6 @@ public class TCPsender {
             if(window.isExpired(currentTimeout)) {
                 sendSegment(fin);
                 window.resetWindowTimer();
-                numRetransmissions++;            
             }
         }
         log("rcv", ack);
@@ -216,6 +214,25 @@ public class TCPsender {
         TCPsegment finalAck = new TCPsegment(fileSize + 2, rcvFin.getSeqNum() + 1, System.nanoTime(), null, false, true, false);
         sendSegment(finalAck);
 
+        // TIME_WAIT: if receiver retransmits FIN (our ACK was dropped), resend ACK
+        socket.setSoTimeout(5000);
+        try {
+            while (true) {
+                try {
+                    byte[] buf = new byte[mtu + 24];
+                    DatagramPacket pkt = new DatagramPacket(buf, buf.length);
+                    socket.receive(pkt);
+                    TCPsegment seg = TCPsegment.deserialize(pkt.getData());
+                    if (seg.isFIN()) {
+                        sendSegment(finalAck);
+                    }
+                } catch (SocketTimeoutException e) {
+                    break; // no retransmit within 5s, receiver got the ACK
+                }
+            }
+        } finally {
+            socket.setSoTimeout(10);
+        }
     }
     
     private void updateTimeout(long rtt) {
@@ -304,13 +321,18 @@ public class TCPsender {
         }
 
         void advance(int ackNum) {
-            while(base < nextSlot && 
-                slots[base % windowSize] != null && 
+            boolean moved = false;
+            while(base < nextSlot &&
+                slots[base % windowSize] != null &&
                 slots[base % windowSize].segment.getSeqNum() + slots[base % windowSize].segment.getDataLength() <= ackNum) {
 
                 slots[base % windowSize] = null;
                 base++;
                 inFlight--;
+                moved = true;
+            }
+            if (moved && inFlight > 0) {
+                windowSendTime = System.nanoTime();
             }
         }
 
