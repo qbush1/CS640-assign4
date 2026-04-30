@@ -33,8 +33,7 @@ public class TCPsender {
     private int dataSent;
     private int packetsSent;
     private int numRetransmissions;
-    private int packetsDiscarded;
-    private int packetsReceived;
+    private int totalDupAcks;
     private long currentTimeout = 5_000_000_000L;
     private long startTime;
 
@@ -156,6 +155,7 @@ public class TCPsender {
 
         if(ackNum == lastAckNum) {
             dupAckCount++;
+            totalDupAcks++;
             if(dupAckCount >= 3) {
                 // fast retransmit
                 retransmitWindow();
@@ -261,7 +261,7 @@ public class TCPsender {
     private void printStats() {
         System.out.printf("%db %d %d %d %d %d%n",
             dataSent, packetsSent, 0,
-            packetsDiscarded, numRetransmissions, 0);
+            0, numRetransmissions, totalDupAcks);
     }
 
     private class SlidingWindow {
