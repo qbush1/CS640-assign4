@@ -101,6 +101,8 @@ public class TCPsender {
                 sendSegment(segment);
                 window.markSent(segment);
                 bytesSent += chunkSize;
+                dataSent += chunkSize;
+                packetsSent++;
             }  
 
             // try to receive ACK
@@ -125,10 +127,6 @@ public class TCPsender {
         DatagramPacket packet = new DatagramPacket(bytes, bytes.length, remoteIP, remotePort);
         socket.send(packet);
         log("snd", segment);
-        packetsSent++;
-        if (segment.getData() != null && segment.getDataLength() > 0) {
-            dataSent += segment.getDataLength();
-        } 
     }
 
     private TCPsegment receiveSegment() {

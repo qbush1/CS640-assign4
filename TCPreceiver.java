@@ -72,7 +72,6 @@ public class TCPreceiver {
                 if (!segment.isValidChecksum()) { incorrectChecksum++; continue; }
                 if (segment.isSYN()) {
                     log("rcv", segment);
-                    packetsReceived++;
                     break;
                 }
             }
@@ -99,7 +98,6 @@ public class TCPreceiver {
                     if (!response.isValidChecksum()) { incorrectChecksum++; continue; }
                     if (response.isACK()) {
                         log("rcv", response);
-                        packetsReceived++;
                         break;
                     }
                 } catch (SocketTimeoutException e) {
@@ -131,6 +129,7 @@ public class TCPreceiver {
 
                 if (!segment.isValidChecksum()) {
                     incorrectChecksum++;
+                    sendDupAck(segment.getTimestamp());
                     continue;
                 }
 
@@ -139,10 +138,9 @@ public class TCPreceiver {
                 if (!isData && !isFin) continue; // ignore unexpected control packets
 
                 if (segment.getSeqNum() == nextExpectedSeqNum) {
-                    // Count received packets, don't count ones that are dropped
                     log("rcv", segment);
-                    packetsReceived++;
-                    
+                    if (!segment.isFIN()) packetsReceived++;
+
                     if (segment.getData() != null && segment.getData().length > 0) {
                         outputFile.write(segment.getData());
                         dataReceived += segment.getDataLength();
@@ -157,13 +155,21 @@ public class TCPreceiver {
 
                     if (segment.isFIN()) return;
                 } else {
-                    // Out of order — drop and let sender retransmit via timeout
+                    // Out of order or duplicate — send dup ACK so sender can fast retransmit
                     outOfSeqPackets++;
+                    sendDupAck(segment.getTimestamp());
                 }
             }
         } catch (IOException e) {
             e.printStackTrace();
         }
+    }
+
+    private void sendDupAck(long timestamp) throws IOException {
+        TCPsegment dupAck = new TCPsegment(this.seqNum, nextExpectedSeqNum, timestamp, null, false, true, false);
+        byte[] dupAckData = dupAck.serialize();
+        socket.send(new DatagramPacket(dupAckData, dupAckData.length, senderAddress, senderPort));
+        log("snd", dupAck);
     }
 
     public void terminateConnection() {
@@ -190,7 +196,6 @@ public class TCPreceiver {
                     if (!response.isValidChecksum()) { incorrectChecksum++; continue; }
                     if (response.isACK()) {
                         log("rcv", response);
-                        packetsReceived++;
                         break;
                     }
                 } catch (SocketTimeoutException e) {
